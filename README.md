@@ -183,12 +183,13 @@ Standardized across all exceptions (`400 Bad Request`, `404 Not Found`, `502 Bad
 
 ### Step 2: Run Frontend (React + Vite)
 
-1. Open a separate terminal in the root directory:
+1. Open a separate terminal in the `weather-frontend` directory:
    ```bash
+   cd weather-frontend
    # Make sure dependencies are installed
    npm install
    ```
-2. Verify environment configuration in `.env`:
+2. Verify environment configuration in `.env` (or copy `.env.example` to `.env`):
    ```properties
    VITE_API_BASE_URL=http://localhost:8080/api
    ```
