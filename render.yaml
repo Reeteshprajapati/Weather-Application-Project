@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: weather-backend
+    runtime: docker
+    rootDir: weather-backend
+    dockerfilePath: Dockerfile
+    plan: free
+    region: oregon
+    envVars:
+      - key: PORT
+        value: 8080
+    healthCheckPath: /api/weather/health
