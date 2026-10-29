@@ -1,4 +1,5 @@
 import { getWeatherCodeInfo, generateWeatherSummary } from '../utils/weatherCodes.js';
+import { generateRecommendations } from '../utils/recommendations.js';
 
 // Base URL for the Spring Boot backend REST API
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api';
@@ -138,6 +139,133 @@ async function fetchAirQualityData(latitude, longitude, signal) {
 }
 
 /**
+ * Direct client-side fetch from Open-Meteo Web APIs.
+ * Used when the frontend is deployed statically (e.g. on Vercel) and the Spring Boot
+ * backend is either not running locally, sleeping on Render free tier, or blocked by Mixed Content.
+ */
+async function fetchWeatherDirectFromOpenMeteo(cityName, signal) {
+  const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cityName)}&count=1&language=en&format=json`;
+  const geoRes = await fetch(geoUrl, { signal });
+  if (!geoRes.ok) {
+    throw new Error(`Geocoding service unavailable (${geoRes.status})`);
+  }
+
+  const geoData = await geoRes.json();
+  if (!geoData.results || geoData.results.length === 0) {
+    throw new Error(`City not found: "${cityName}"`);
+  }
+
+  const location = geoData.results[0];
+  const { latitude, longitude, name, country, timezone } = location;
+
+  const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m,surface_pressure&hourly=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,uv_index_max&timezone=${encodeURIComponent(timezone || 'auto')}&forecast_days=7`;
+
+  const [forecastRes, airQualityData] = await Promise.all([
+    fetch(forecastUrl, { signal }),
+    fetchAirQualityData(latitude, longitude, signal)
+  ]);
+
+  if (!forecastRes.ok) {
+    throw new Error(`Forecast service unavailable (${forecastRes.status})`);
+  }
+
+  const forecastData = await forecastRes.json();
+  const current = forecastData.current || {};
+  const hourly = forecastData.hourly || {};
+  const daily = forecastData.daily || {};
+
+  const weatherCode = current.weather_code ?? 0;
+  const isDay = current.is_day === 1;
+  const conditionInfo = getWeatherCodeInfo(weatherCode, isDay);
+  const conditionText = conditionInfo.label;
+  const tempCelsius = current.temperature_2m;
+  const feelsLikeCelsius = current.apparent_temperature ?? tempCelsius;
+  const windKmh = current.wind_speed_10m;
+  const humidity = current.relative_humidity_2m;
+  const pressure = current.surface_pressure;
+
+  const uvIndex = Array.isArray(daily.uv_index_max) && daily.uv_index_max.length > 0 ? daily.uv_index_max[0] : null;
+  const sunrise = Array.isArray(daily.sunrise) && daily.sunrise.length > 0 ? daily.sunrise[0] : null;
+  const sunset = Array.isArray(daily.sunset) && daily.sunset.length > 0 ? daily.sunset[0] : null;
+  const maxPrecipProb = Array.isArray(daily.precipitation_probability_max) && daily.precipitation_probability_max.length > 0
+    ? daily.precipitation_probability_max[0]
+    : null;
+
+  // Hourly forecast (next 24 hours)
+  const hourlyList = Array.isArray(hourly.time)
+    ? hourly.time.slice(0, 24).map((timeStr, index) => {
+        const code = hourly.weather_code ? hourly.weather_code[index] : 0;
+        const info = getWeatherCodeInfo(code, 1);
+        const temp = hourly.temperature_2m ? Math.round(hourly.temperature_2m[index]) : null;
+        return {
+          time: index === 0 ? 'Now' : formatLocalTimeString(timeStr),
+          temp,
+          condition: info.label,
+          weatherCode: code,
+          pop: null
+        };
+      })
+    : [];
+
+  // Daily forecast (7 days)
+  const dailyList = Array.isArray(daily.time)
+    ? daily.time.slice(0, 7).map((dateStr, index) => {
+        const code = daily.weather_code ? daily.weather_code[index] : 0;
+        const info = getWeatherCodeInfo(code, 1);
+        const minTemp = daily.temperature_2m_min ? Math.round(daily.temperature_2m_min[index]) : null;
+        const maxTemp = daily.temperature_2m_max ? Math.round(daily.temperature_2m_max[index]) : null;
+        return {
+          day: getDayOfWeekName(dateStr, index),
+          date: formatShortDate(dateStr),
+          condition: info.label,
+          weatherCode: code,
+          minTemp,
+          maxTemp,
+          pop: null
+        };
+      })
+    : [];
+
+  // Rule-based smart recommendations (identical logic to backend)
+  const recommendations = generateRecommendations(
+    maxPrecipProb,
+    uvIndex,
+    windKmh,
+    tempCelsius,
+    weatherCode
+  );
+
+  return {
+    city: name,
+    country: country || '',
+    latitude,
+    longitude,
+    timezone: forecastData.timezone || timezone || null,
+    current: {
+      temp: tempCelsius != null ? Math.round(tempCelsius) : null,
+      feelsLike: feelsLikeCelsius != null ? Math.round(feelsLikeCelsius) : null,
+      condition: conditionText,
+      weatherCode,
+      isDay,
+      humidity: typeof humidity === 'number' ? humidity : null,
+      windSpeed: windKmh != null ? Math.round(windKmh) : null,
+      uvIndex: uvIndex != null ? Math.round(uvIndex * 10) / 10 : null,
+      pressure: pressure != null ? Math.round(pressure) : null,
+      sunrise: sunrise ? formatLocalTimeString(sunrise) : null,
+      sunset: sunset ? formatLocalTimeString(sunset) : null,
+      summary: tempCelsius != null && windKmh != null
+        ? generateWeatherSummary(conditionText, tempCelsius, windKmh, isDay)
+        : `Currently ${conditionText}.`
+    },
+    airQuality: airQualityData,
+    hourly: hourlyList,
+    forecast: dailyList,
+    recommendations,
+    source: 'direct'
+  };
+}
+
+/**
  * Checks connectivity and status of the Spring Boot backend
  * @returns {Promise<{status: string, message: string}>}
  */
@@ -155,12 +283,14 @@ export async function checkBackendHealth() {
 }
 
 /**
- * Fetches real weather data for a city from the Spring Boot backend API
- * GET /api/weather?city={cityName}
+ * Fetches real weather data for a city.
+ * Attempts the Spring Boot REST backend first; if unreachable (e.g. running on HTTPS Vercel,
+ * backend offline, or sleeping on Render free-tier), gracefully falls back to direct Open-Meteo
+ * APIs with full deterministic recommendation rules and air quality evaluation.
  *
  * @param {string} cityName - Name of the city to query (e.g. "Indore")
  * @param {AbortSignal} [signal] - Optional AbortController signal
- * @returns {Promise<object>} Real API-driven weather presentation model with AQI
+ * @returns {Promise<object>} Complete weather presentation model with AQI & recommendations
  */
 export async function fetchWeatherFromBackend(cityName, signal) {
   const trimmedCity = String(cityName || '').trim();
@@ -175,7 +305,26 @@ export async function fetchWeatherFromBackend(cityName, signal) {
     return cached.data;
   }
 
+  const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const isLocalBackend = !API_BASE_URL || API_BASE_URL.includes('localhost') || API_BASE_URL.includes('127.0.0.1');
+
+  // If on an HTTPS deployment (e.g. Vercel) and backend URL points to localhost, browsers strictly block
+  // mixed content requests. Skip the impossible localhost call and immediately use direct Open-Meteo.
+  if (isHttpsPage && isLocalBackend) {
+    const directPayload = await fetchWeatherDirectFromOpenMeteo(trimmedCity, signal);
+    weatherCache.set(cacheKey, { timestamp: Date.now(), data: directPayload });
+    return directPayload;
+  }
+
+  // Attempt backend with an explicit 4-second timeout controller so UI never hangs indefinitely
   const requestUrl = `${API_BASE_URL}/weather?city=${encodeURIComponent(trimmedCity)}`;
+  const backendTimeoutController = new AbortController();
+  const timeoutId = setTimeout(() => backendTimeoutController.abort(), 4000);
+
+  // Link caller signal to timeout controller
+  if (signal) {
+    signal.addEventListener('abort', () => backendTimeoutController.abort(), { once: true });
+  }
 
   try {
     const response = await fetch(requestUrl, {
@@ -183,36 +332,30 @@ export async function fetchWeatherFromBackend(cityName, signal) {
       headers: {
         'Accept': 'application/json'
       },
-      signal
+      signal: backendTimeoutController.signal
     });
+    clearTimeout(timeoutId);
 
-    // Handle non-2xx HTTP responses according to backend's ErrorResponseDto contract
-    if (!response.ok) {
-      let errorMessage = `Server error (${response.status})`;
+    // If city not found (404) or invalid (400), honor backend's business error
+    if (response.status === 404) {
+      let errorMessage = `City not found: "${trimmedCity}"`;
       try {
         const errorBody = await response.json();
-        if (errorBody && errorBody.message) {
-          errorMessage = errorBody.message;
-        }
+        if (errorBody && errorBody.message) errorMessage = errorBody.message;
       } catch {
-        errorMessage = response.statusText || errorMessage;
+        // use default message
       }
+      throw new Error(errorMessage);
+    }
 
-      if (response.status === 404) {
-        throw new Error(errorMessage.startsWith('City not found') ? errorMessage : `City not found: "${trimmedCity}"`);
-      } else if (response.status === 400) {
-        throw new Error(errorMessage);
-      } else if (response.status >= 500) {
-        throw new Error(errorMessage || 'Weather service is temporarily unavailable. Please try again later.');
-      } else {
-        throw new Error(errorMessage);
-      }
+    if (!response.ok) {
+      throw new Error(`Backend returned HTTP ${response.status}`);
     }
 
     // Parse WeatherResponseDto from backend
     const dto = await response.json();
 
-    // Map backend DTO into frontend's presentation model safely without fake values
+    // Map backend DTO into frontend presentation model
     const conditionText = dto.weatherDescription || getWeatherCodeInfo(dto.weatherCode, dto.isDay).label;
     const tempCelsius = typeof dto.temperature === 'number' ? dto.temperature : null;
     const feelsLikeCelsius = typeof dto.feelsLike === 'number' ? dto.feelsLike : tempCelsius;
@@ -278,23 +421,30 @@ export async function fetchWeatherFromBackend(cityName, signal) {
       airQuality: airQualityData,
       hourly: hourlyList,
       forecast: dailyList,
-      recommendations: Array.isArray(dto.recommendations) ? dto.recommendations : []
+      recommendations: Array.isArray(dto.recommendations) ? dto.recommendations : [],
+      source: 'backend'
     };
 
-    // Store in cache
     weatherCache.set(cacheKey, { timestamp: Date.now(), data: weatherPayload });
     return weatherPayload;
   } catch (error) {
-    if (error.name === 'AbortError') {
+    clearTimeout(timeoutId);
+
+    // If request was aborted by user typing a new city, rethrow abort
+    if (signal?.aborted) {
       throw error;
     }
-    console.error(`Error fetching weather for '${trimmedCity}':`, error);
 
-    if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
-      throw new Error(
-        `Cannot reach the Spring Boot backend at ${API_BASE_URL}. Ensure the backend is running on port 8080.`
-      );
+    // If city not found was explicitly returned, throw it
+    if (error.message?.includes('City not found')) {
+      throw error;
     }
-    throw error;
+
+    console.warn('Backend unavailable, falling back to direct Open-Meteo observations:', error.message);
+
+    // Smooth fallback to client direct Open-Meteo
+    const fallbackPayload = await fetchWeatherDirectFromOpenMeteo(trimmedCity, signal);
+    weatherCache.set(cacheKey, { timestamp: Date.now(), data: fallbackPayload });
+    return fallbackPayload;
   }
 }

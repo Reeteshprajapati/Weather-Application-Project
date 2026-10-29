@@ -16,6 +16,7 @@ const RECENT_SEARCHES_STORAGE_KEY = 'skypulse_user_recent_searches_v5';
 const FAVORITES_STORAGE_KEY = 'skypulse_favorite_cities_v1';
 const TEMP_UNIT_STORAGE_KEY = 'skypulse_temp_unit';
 const DEFAULT_CITY = 'Indore';
+const CURRENT_YEAR = new Date().getFullYear();
 
 export default function App() {
   // State management
@@ -230,13 +231,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-canvas text-navy font-sans antialiased">
-      
+
       {/* Navigation & Unit Switcher */}
       <Navbar unit={unit} onToggleUnit={handleToggleUnit} />
 
       {/* Main Container */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-6">
-        
+
         {/* Advanced Search, Pinned Favorites, & Recent History Card */}
         <section className="bg-white rounded-3xl border-2 border-slate-200/90 shadow-card p-5 sm:p-6 space-y-3.5">
           <SearchBar onSearch={handleSearch} isLoading={isLoading} />
@@ -274,7 +275,7 @@ export default function App() {
           <LoadingSkeleton />
         ) : weatherData ? (
           <div className="space-y-6">
-            
+
             {/* Main Current Weather Hero Card */}
             <CurrentWeather
               weatherData={weatherData}
@@ -293,7 +294,7 @@ export default function App() {
 
             {/* Forecast Sections */}
             <div className="grid grid-cols-1 gap-6">
-              
+
               {/* 24-Hour Forecast */}
               <HourlyForecast hourlyData={weatherData.hourly} unit={unit} />
 
@@ -307,12 +308,19 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="mt-auto border-t-2 border-slate-200 bg-white py-6 text-center text-xs font-semibold text-slate-500">
-        <div className="max-w-6xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>SkyPulse • React + Java 21 Spring Boot REST Architecture</span>
-          <span>Live Open-Meteo Weather & Air Quality Observations</span>
+
+      <footer className="mt-auto border-t border-[#E2E0D7] bg-[#F5F2EA] py-5">
+        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-4 text-center sm:flex-row">
+          <p className="text-xs text-[#68716B]">
+            © {CURRENT_YEAR} Reetesh Prajapati. All rights reserved.
+          </p>
+
+          <p className="text-xs font-medium tracking-wide text-[#344E41]">
+            SkyPulse — Weather, made simple.
+          </p>
         </div>
       </footer>
+
 
     </div>
   );
